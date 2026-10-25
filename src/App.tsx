@@ -10,6 +10,13 @@ import { RoundSummaryModal } from './components/RoundSummaryModal';
 import { RulesModal } from './components/RulesModal';
 import { sound } from './utils/sound';
 import { useGameSoundEffects } from './hooks/useGameSoundEffects';
+import {
+  staticCreateRoom,
+  staticJoinRoom,
+  staticAutostartRoom,
+  staticPerformAction,
+  subscribeStaticRoom,
+} from './utils/clientRoomFallback';
 
 function getOrCreateTabPlayerId(): string {
   try {
@@ -107,16 +114,31 @@ export default function App() {
             playerName: playerName || 'Detective Alex',
           }),
         });
+        const contentType = res.headers.get('content-type') || '';
+        if (!res.ok || !contentType.includes('application/json')) {
+          const fallbackRoom = staticAutostartRoom(
+            myPlayerId,
+            playerName || 'Detective Alex'
+          );
+          setRoom(fallbackRoom);
+          setActivePlayerId(myPlayerId);
+          updateUrlRoomParam(fallbackRoom.code);
+          return;
+        }
         const data = await res.json();
-        if (!res.ok) {
-          setError(data.error || 'Could not start demo room.');
-        } else if (data.room) {
+        if (data.room) {
           setRoom(data.room);
           setActivePlayerId(myPlayerId);
           updateUrlRoomParam(data.room.code);
         }
       } catch {
-        setError('Network error starting demo room.');
+        const fallbackRoom = staticAutostartRoom(
+          myPlayerId,
+          playerName || 'Detective Alex'
+        );
+        setRoom(fallbackRoom);
+        setActivePlayerId(myPlayerId);
+        updateUrlRoomParam(fallbackRoom.code);
       } finally {
         setLoading(false);
       }
@@ -132,12 +154,20 @@ export default function App() {
     }
   }, [handleQuickStartDemo, savedName]);
 
-  // WebSocket subscription + fallback HTTP sync while in a room
+  // WebSocket subscription + fallback HTTP sync + static BroadcastChannel sync while in a room
   useEffect(() => {
     const roomCode = room?.code;
     if (!roomCode) return;
 
     let isDisposed = false;
+    const unsubscribeStatic = subscribeStaticRoom(roomCode, (updatedRoom) => {
+      if (!isDisposed) {
+        setRoom((prev) =>
+          !prev || updatedRoom.updatedAt >= prev.updatedAt ? updatedRoom : prev
+        );
+      }
+    });
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
 
@@ -170,11 +200,11 @@ export default function App() {
 
         ws.onclose = () => {
           if (!isDisposed) {
-            setTimeout(connectWs, 2000);
+            setTimeout(connectWs, 3500);
           }
         };
       } catch {
-        // Fallback poll handles synchronization if WS is blocked
+        // Fallback poll or static sync handles synchronization if WS is blocked
       }
     };
 
@@ -184,7 +214,8 @@ export default function App() {
       if (isDisposed) return;
       try {
         const res = await fetch(`/api/rooms/${roomCode}`);
-        if (res.ok) {
+        const contentType = res.headers.get('content-type') || '';
+        if (res.ok && contentType.includes('application/json')) {
           const data = await res.json();
           if (data.room) {
             setRoom((prev) =>
@@ -199,6 +230,7 @@ export default function App() {
 
     return () => {
       isDisposed = true;
+      unsubscribeStatic();
       clearInterval(pollInterval);
       if (wsRef.current) {
         wsRef.current.close();
@@ -262,16 +294,25 @@ export default function App() {
           playerName,
         }),
       });
+      const contentType = res.headers.get('content-type') || '';
+      if (!res.ok || !contentType.includes('application/json')) {
+        const fallbackRoom = staticCreateRoom(myPlayerId, playerName);
+        setRoom(fallbackRoom);
+        setActivePlayerId(myPlayerId);
+        updateUrlRoomParam(fallbackRoom.code);
+        return;
+      }
       const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || 'Could not create room.');
-      } else if (data.room) {
+      if (data.room) {
         setRoom(data.room);
         setActivePlayerId(myPlayerId);
         updateUrlRoomParam(data.room.code);
       }
     } catch {
-      setError('Could not connect to server. Please try again.');
+      const fallbackRoom = staticCreateRoom(myPlayerId, playerName);
+      setRoom(fallbackRoom);
+      setActivePlayerId(myPlayerId);
+      updateUrlRoomParam(fallbackRoom.code);
     } finally {
       setLoading(false);
     }
@@ -291,16 +332,38 @@ export default function App() {
           playerName,
         }),
       });
+      const contentType = res.headers.get('content-type') || '';
+      if (res.status === 404 && contentType.includes('application/json')) {
+        const data = await res.json();
+        setError(data.error || 'Room not found.');
+        return;
+      }
+      if (!res.ok || !contentType.includes('application/json')) {
+        const fallback = staticJoinRoom(roomCode, myPlayerId, playerName);
+        if (fallback.room) {
+          setRoom(fallback.room);
+          setActivePlayerId(myPlayerId);
+          updateUrlRoomParam(fallback.room.code);
+        } else if (fallback.error) {
+          setError(fallback.error);
+        }
+        return;
+      }
       const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || 'Could not join room.');
-      } else if (data.room) {
+      if (data.room) {
         setRoom(data.room);
         setActivePlayerId(myPlayerId);
         updateUrlRoomParam(data.room.code);
       }
     } catch {
-      setError('Could not connect to room. Please try again.');
+      const fallback = staticJoinRoom(roomCode, myPlayerId, playerName);
+      if (fallback.room) {
+        setRoom(fallback.room);
+        setActivePlayerId(myPlayerId);
+        updateUrlRoomParam(fallback.room.code);
+      } else if (fallback.error) {
+        setError(fallback.error);
+      }
     } finally {
       setLoading(false);
     }
@@ -323,6 +386,19 @@ export default function App() {
           payload,
         }),
       });
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
+        const fallback = staticPerformAction(
+          room.code,
+          room,
+          action,
+          actingPlayerId,
+          payload
+        );
+        setRoom(fallback.room);
+        if (fallback.error) setError(fallback.error);
+        return;
+      }
       const data = await res.json();
       if (data.room) {
         setRoom(data.room);
@@ -331,7 +407,15 @@ export default function App() {
         setError(data.error);
       }
     } catch {
-      setError('Connection hiccup—retrying sync...');
+      const fallback = staticPerformAction(
+        room.code,
+        room,
+        action,
+        actingPlayerId,
+        payload
+      );
+      setRoom(fallback.room);
+      if (fallback.error) setError(fallback.error);
     }
   };
 
@@ -348,12 +432,19 @@ export default function App() {
           playerName: friendName,
         }),
       });
+      const contentType = res.headers.get('content-type') || '';
+      if (!res.ok || !contentType.includes('application/json')) {
+        const fallback = staticJoinRoom(room.code, seatId, friendName);
+        if (fallback.room) setRoom(fallback.room);
+        return;
+      }
       const data = await res.json();
       if (data.room) {
         setRoom(data.room);
       }
     } catch {
-      setError('Could not add friend seat.');
+      const fallback = staticJoinRoom(room.code, seatId, friendName);
+      if (fallback.room) setRoom(fallback.room);
     }
   };
 
