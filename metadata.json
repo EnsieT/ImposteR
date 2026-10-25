@@ -1,0 +1,6 @@
+{
+  "name": "Sticky Note Imposter",
+  "description": "Concurrent multi-device social deduction party game where everyone gets the secret word on their sticky note except the Imposter.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
